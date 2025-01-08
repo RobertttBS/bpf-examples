@@ -344,12 +344,12 @@ bcache_cons_check(struct bcache *bc, u32 n_buffers)
 	}
 
 	n_slabs_available--;
-	slab_full = bp->slabs[n_slabs_available];
-	bp->slabs[n_slabs_available] = bc->slab_cons;
-	bp->n_slabs_available = n_slabs_available;
+	slab_full = bp->slabs[n_slabs_available]; // 之前 prod 填滿的 slab
+	bp->slabs[n_slabs_available] = bc->slab_cons; // 交換
+	bp->n_slabs_available = n_slabs_available; // 把空的 slab 位置寫回去給 pool
 	pthread_mutex_unlock(&bp->lock);
 
-	bc->slab_cons = slab_full;
+	bc->slab_cons = slab_full; // 拿到一個滿的 slab 能夠 cons 了
 	bc->n_buffers_cons = n_buffers_per_slab;
 	return n_buffers;
 }
@@ -414,7 +414,7 @@ bcache_prod(struct bcache *bc, u64 buffer)
 #endif
 
 #ifndef MAX_BURST_TX
-#define MAX_BURST_TX 64
+#define MAX_BURST_TX 1
 #endif
 
 struct burst_rx {
@@ -570,10 +570,11 @@ port_rx_burst(struct port *p, struct burst_rx *b)
 				.events = POLLIN,
 			};
 
-			poll(&pollfd, 1, 0);
+			poll(&pollfd, 1, 0); // 這邊是要等待 umem_fq 有空間可以放 buffer
 		}
 	}
 
+	// 從 slab_cons 裡面拿出 buffer (addr) 並填入 umem_fq
 	for (i = 0; i < n_pkts; i++)
 		*xsk_ring_prod__fill_addr(&p->umem_fq, pos + i) =
 			bcache_cons(p->bc);
@@ -621,6 +622,7 @@ port_tx_burst(struct port *p, struct burst_tx *b)
 	}
 
 	xsk_ring_prod__submit(&p->txq, n_pkts);
+	printf("tx commit");
 	if (xsk_ring_prod__needs_wakeup(&p->txq))
 		sendto(xsk_socket__fd(p->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 	p->n_pkts_tx += n_pkts;
@@ -647,14 +649,28 @@ struct thread_data {
 
 static void swap_mac_addresses(void *data)
 {
-	struct ether_header *eth = (struct ether_header *)data;
-	struct ether_addr *src_addr = (struct ether_addr *)&eth->ether_shost;
-	struct ether_addr *dst_addr = (struct ether_addr *)&eth->ether_dhost;
-	struct ether_addr tmp;
+    struct ether_header *eth = (struct ether_header *)data;
+    
+    // Define MAC addresses
+    unsigned char veth0[6] = {0xde, 0xaf, 0xa6, 0x31, 0x24, 0xf8}; // veth0 mac address
+    unsigned char veth1[6] = {0xd2, 0x22, 0x90, 0x65, 0x6d, 0xa3}; // veth1 mac address
+    unsigned char veth2[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x02}; // veth2 mac address
+    unsigned char veth3[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x03}; // veth3 mac address
 
-	tmp = *src_addr;
-	*src_addr = *dst_addr;
-	*dst_addr = tmp;
+    // If source MAC is veth1
+    if (memcmp(eth->ether_shost, veth1, 6) == 0) {
+        // Set source MAC to veth2
+        memcpy(eth->ether_shost, veth2, 6);
+        // Set destination MAC to veth3
+        memcpy(eth->ether_dhost, veth3, 6);
+    }
+    // If source MAC is veth3
+    else if (memcmp(eth->ether_shost, veth3, 6) == 0) {
+        // Set source MAC to veth0
+        memcpy(eth->ether_shost, veth0, 6);
+        // Set destination MAC to veth1
+        memcpy(eth->ether_dhost, veth1, 6);
+    }
 }
 
 static void *
@@ -693,6 +709,7 @@ thread_func(void *arg)
 			btx->n_pkts++;
 
 			if (btx->n_pkts == MAX_BURST_TX) {
+				printf("tx commit burst\n");
 				port_tx_burst(port_tx, btx);
 				btx->n_pkts = 0;
 			}

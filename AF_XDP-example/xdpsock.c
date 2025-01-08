@@ -890,6 +890,7 @@ static inline u16 udp_csum(u32 saddr, u32 daddr, u32 len,
 
 static u8 pkt_data[MAX_PKT_SIZE];
 
+// 把 pkt_data 填一填
 static void gen_eth_hdr_data(void)
 {
 	struct pktgen_hdr *pktgen_hdr;
@@ -970,6 +971,7 @@ static void gen_eth_hdr_data(void)
 				  IPPROTO_UDP, (u16 *)udp_hdr);
 }
 
+// 把整個 packet 放進 frame 裡面
 static void gen_eth_frame(struct xsk_umem_info *umem, u64 addr)
 {
 	static u32 len;
@@ -1469,7 +1471,7 @@ static void rx_drop(struct xsk_socket_info *xsk)
 	if (!rcvd) {
 		if (opt_busy_poll || xsk_ring_prod__needs_wakeup(&xsk->umem->fq)) {
 			xsk->app_stats.rx_empty_polls++;
-			recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+			recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL); // 看要不要用 recvfrom 喚醒 socket
 		}
 		return;
 	}
@@ -1715,6 +1717,7 @@ static void tx_only_all(void)
 		complete_tx_only_all();
 }
 
+// 針對一個 socket 做 L2 forwarding
 static void l2fwd(struct xsk_socket_info *xsk)
 {
 	u32 idx_rx = 0, idx_tx = 0, frags_done = 0;
@@ -1895,16 +1898,18 @@ static void enter_xsks_into_map(void)
 	int i, xsks_map;
 	int key = 0;
 
-	data_map = bpf_object__find_map_by_name(xdp_program__bpf_obj(xdp_prog), ".bss");
+	// 從 user space 更新 kernel space 的 num_socks 變數，.bss 是一個特殊的 map，用於存儲全局變數
+	data_map = bpf_object__find_map_by_name(xdp_program__bpf_obj(xdp_prog), ".bss"); // libbpf 拿到 object 的 bss map
 	if (!data_map || !bpf_map__is_internal(data_map)) {
 		fprintf(stderr, "ERROR: bss map found!\n");
 		exit(EXIT_FAILURE);
 	}
-	if (bpf_map_update_elem(bpf_map__fd(data_map), &key, &num_socks, BPF_ANY)) {
+	if (bpf_map_update_elem(bpf_map__fd(data_map), &key, &num_socks, BPF_ANY)) { // 將 num_socks（socket 數量）存入 map 中
 		fprintf(stderr, "ERROR: bpf_map_update_elem num_socks %d!\n", num_socks);
 		exit(EXIT_FAILURE);
 	}
-	xsks_map = lookup_bpf_map(xdp_program__fd(xdp_prog));
+	// 把 socket 弄進去 xsks_map
+	xsks_map = lookup_bpf_map(xdp_program__fd(xdp_prog)); // 用 fd 去拿 BPF Map
 	if (xsks_map < 0) {
 		fprintf(stderr, "ERROR: no xsks map found: %s\n",
 			strerror(xsks_map));
@@ -1912,11 +1917,11 @@ static void enter_xsks_into_map(void)
 	}
 
 	for (i = 0; i < num_socks; i++) {
-		int fd = xsk_socket__fd(xsks[i]->xsk);
+		int fd = xsk_socket__fd(xsks[i]->xsk); // 拿到 socket fd
 		int ret;
 
 		key = i;
-		ret = bpf_map_update_elem(xsks_map, &key, &fd, 0);
+		ret = bpf_map_update_elem(xsks_map, &key, &fd, 0); // 把 fd 放到 BPF Map 里
 		if (ret) {
 			fprintf(stderr, "ERROR: bpf_map_update_elem %d\n", i);
 			exit(EXIT_FAILURE);
@@ -2092,7 +2097,7 @@ int main(int argc, char **argv)
 	}
 	frames_per_pkt = (opt_pkt_size - 1) / XSK_UMEM__DEFAULT_FRAME_SIZE + 1;
 
-	if (load_xdp_prog && opt_bench != BENCH_TXONLY)
+	if (load_xdp_prog && opt_bench != BENCH_TXONLY) // 要收封包就要把 socket 註冊進 XSK_MAP
 		enter_xsks_into_map();
 
 	if (opt_reduced_cap) {
